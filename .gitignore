@@ -1,0 +1,8 @@
+#Make file related ignores
+src/obj
+
+#Git ignore for code-runner extension
+src/revim.dSYM
+
+#IDE specific .gitignore related clauses
+/.vscode

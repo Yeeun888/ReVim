@@ -1,0 +1,4 @@
+# Ignore every file in this forlder
+*
+# Except this one
+!.gitignore

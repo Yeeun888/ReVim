@@ -1,4 +1,8 @@
 //------------------------------ Includes ---------------------------------------
+#define _DEFAULT_SOURCE
+#define _BSD_SOURCE
+#define _GNU_SOURCE
+
 #include <termios.h>
 #include <unistd.h>
 #include <stdio.h>
@@ -8,9 +12,20 @@
 #include <sys/ioctl.h>
 #include <string.h>
 #include <stdio.h>
+#include <sys/types.h>
+#include <time.h>
+#include <stdarg.h>
+
+//------------------------------- DEBUG ----------------------------------------
+#define DEBUG
+#ifdef DEBUG
+FILE* debug_file = NULL;
+#endif 
 
 //------------------------------ Defines ---------------------------------------
 #define REVIM_VER "0.0.1" 
+#define REVIM_TAB_SIZE 4
+
 #define CTRL_KEY(k) ((k) & 0x1f)
 
 enum editorKey { // Internal representation of keys for editor
@@ -29,11 +44,26 @@ enum editorKey { // Internal representation of keys for editor
 void disableRawMode();
 
 //-------------------------------- DATA ----------------------------------------
+typedef struct erow {
+    int size;
+    int rsize;
+    char *chars;
+    char *render;
+} erow;
+
 struct editorConfig {
-    int cx, cy;
-    int rows;
-    int columns;
-    struct termios init_termios;
+    int cx, cy;                         // Cursor position (0-index)
+    int rx;                             // Cursor position after space tab
+    int rowoff;                         // Row offset
+    int coloff;                         // Column offset
+    int terminal_rows;                  // Current terminal height (rows / 1-index)
+    int terminal_cols;                  // Current terminal width (columns / 1-index)
+    int numrows;                        // Number of all rows in terminal
+    erow *row;                          // Array of rows (All text stored in memory)
+    char *filename;                     // Current filename
+    char statusmsg[80];                 // Status for user to see
+    time_t statusmsg_time;              // Time stamp for status message
+    struct termios init_termios;        // Initial terminal configuration
 };
 
 struct editorConfig gc; //Global config (gc)
@@ -209,6 +239,91 @@ int getWindowSize(int* rows, int* columns) {
     return 0;
 }
 
+//---------------------------- Rows Operations ---------------------------------
+int editorRowCxToRx(erow *row, int cx) {
+    int rx = 0;
+
+    for (int i = 0; i < cx; ++i) {
+        if (row->chars[i] == '\t') {
+            rx += (REVIM_TAB_SIZE - 1) - (rx % REVIM_TAB_SIZE);
+        }
+        ++rx;
+    }
+
+    return rx;
+}
+
+void editorUpdateRow(erow *row) {
+    //Malloc count tabs to malloc required space based on tab size
+    int tabs = 0;
+    for (int j = 0; j < row->size; j++) {
+        if (row->chars[j] == '\t') { tabs++; };
+    }
+
+    free(row->render);
+    row->render = malloc(row->size + 1 + tabs*(REVIM_TAB_SIZE - 1));
+
+    int idx = 0;
+    for (int j = 0; j < row->size; ++j) {
+        if (row->chars[j] == '\t') {
+            row->render[idx++] = ' ';
+            while (idx % REVIM_TAB_SIZE != 0) {
+                //Add spaces until no more tab
+                row->render[idx++] = ' ';
+            }
+        } else {
+            row->render[idx++] = row->chars[j];
+        }
+    }
+    row->render[idx] = '\0';
+    row->rsize = idx;
+}
+
+void editorAppendRow(char *s, size_t len) {
+    gc.row = realloc(gc.row, sizeof(erow) * (gc.numrows + 1));
+
+    int at = gc.numrows;
+    gc.row[at].size = len;
+    gc.row[at].chars = malloc(len + 1);
+    memcpy(gc.row[at].chars, s, len);
+    gc.row[at].chars[len] = '\0';
+
+    gc.row[at].rsize = 0;
+    gc.row[at].render = NULL;
+    editorUpdateRow(&gc.row[at]);
+
+    gc.numrows++;
+}
+
+//------------------------------- File I/O -------------------------------------
+void editorOpen(char *filename) {
+    free(gc.filename);
+    gc.filename = strdup(filename);
+
+    FILE *fp = fopen(filename, "r");
+    if(!fp) {
+        die("fopen");
+    }
+
+    char *line = NULL;
+    size_t linecap = 0;
+    ssize_t linelen;
+    
+    while((linelen = getline(&line, &linecap, fp)) != -1) {;
+        if(linelen != -1) {
+            //Remov all the \n and \r from a line before printing it
+            while (linelen > 0 && (line[linelen -1] == '\n' ||
+                                line[linelen -1] == '\r')) {
+                linelen--;
+            }
+            editorAppendRow(line, linelen);
+        }
+    }
+
+    free(line);
+    fclose(fp);
+}
+
 //----------------------------- Append Buffer ----------------------------------
 struct abuf {
     char *b;
@@ -236,37 +351,106 @@ void abFree(struct abuf *ab) {
 }
 
 //-------------------------------- Output --------------------------------------
+void editorScroll() {
+    gc.rx = 0;
+    if (gc.cy < gc.numrows) {
+        gc.rx = editorRowCxToRx(&gc.row[gc.cy], gc.cx);
+    }
+
+    //Scroll up
+    if (gc.cy < gc.rowoff) {
+        gc.rowoff = gc.cy;
+    }
+    //Scroll down
+    if (gc.cy >= gc.rowoff + gc.terminal_rows) {
+        gc.rowoff = gc.cy - gc.terminal_rows + 1;
+    }
+    //Scroll left
+    if (gc.rx < gc.coloff) {
+        gc.coloff = gc.rx;
+    }
+    //Scroll right
+    if (gc.rx >= gc.coloff + gc.terminal_cols) {
+        gc.coloff = gc.rx - gc.terminal_cols + 1;
+    }
+}
+
 void editorDrawRows(struct abuf *ab) {
-    for(int i = 0; i < gc.rows; ++i) {
-        if(i == gc.rows / 3) {
-            char welcome[80];
-            int welcomelen = snprintf(welcome, sizeof(welcome), "Revim Editor -- Version %s", REVIM_VER);
-            
-            //Make it so that the message is shortend whenever the screen is not large enough
-            if (welcomelen > gc.columns) {
-                welcomelen = gc.columns;
-            }
+    for(int i = 0; i < gc.terminal_rows; ++i) {
+        int filerow = i + gc.rowoff; // Starting row to render at
 
-            int sidePadding = (gc.columns - welcomelen) / 2;
-            if (sidePadding) {
+        if(filerow >= gc.numrows) { //When filerow exceeds number of rows in file
+            if(gc.numrows == 0 && i == gc.terminal_rows / 3) {
+                char welcome[80];
+                int welcomelen = snprintf(welcome, sizeof(welcome), "Revim Editor -- Version %s", REVIM_VER);
+                
+                //Make it so that the message is shortend whenever the screen is not large enough
+                if (welcomelen > gc.terminal_cols) {
+                    welcomelen = gc.terminal_cols;
+                }
+    
+                int sidePadding = (gc.terminal_cols - welcomelen) / 2;
+                if (sidePadding) {
+                    abAppend(ab, "~", 1);       
+                    sidePadding--;
+                }
+                while (sidePadding--) { abAppend(ab, " ", 1); }
+                abAppend(ab, welcome, welcomelen);
+    
+            } else {
                 abAppend(ab, "~", 1);       
-                sidePadding--;
             }
-            while (sidePadding--) { abAppend(ab, " ", 1); }
-            abAppend(ab, welcome, welcomelen);
-
-        } else {
-            abAppend(ab, "~", 1);       
+        } else { // Appends file contents into AB otherwise
+            int len = gc.row[filerow].rsize - gc.coloff;
+            if (len < 0) { len = 0; }
+            if (len > gc.terminal_cols) { len = gc.terminal_cols; }
+            abAppend(ab, &gc.row[filerow].render[gc.coloff], len);
         }
+
 
         abAppend(ab, "\x1b[K", 3); // Clear line
-        if(i < gc.rows - 1) {
-            abAppend(ab, "\r\n", 2);
+        abAppend(ab, "\r\n", 2);
+    }
+}
+
+void editorDrawStatusBar(struct abuf *ab) {
+    abAppend(ab, "\x1b[7m", 4);
+    char status[80], rstatus[80];
+    int len = snprintf(status, sizeof(status), 
+        " %.20s - %d lines", gc.filename ? gc.filename : "[No Name]", gc.numrows);
+    int rlen = snprintf(rstatus, sizeof(rstatus), "%d,%d ", gc.cy + 1, gc.numrows);
+    if (len > gc.terminal_cols) {
+        len = gc.terminal_cols;
+    }
+    abAppend(ab, status, len);
+
+    while (len < gc.terminal_cols) {
+        if(gc.terminal_cols - len == rlen) {
+            abAppend(ab, rstatus, rlen);
+            break;
+        } else {
+            abAppend(ab, " ", 1);
+            len++;
         }
+    }
+    abAppend(ab, "\x1b[m", 3);
+    abAppend(ab, "\r\n", 2);
+}
+
+void editorDrawMessageBar(struct abuf *ab) {
+    abAppend(ab, "\x1b[K", 3);
+    int msglen = strlen(gc.statusmsg);
+    if (msglen > gc.terminal_cols) {
+        msglen = gc.terminal_cols;
+    }
+    if (msglen && (time(NULL) - gc.statusmsg_time) < 5) {
+        abAppend(ab, gc.statusmsg, msglen);
     }
 }
 
 void editorRefreshScreen() {
+    editorScroll();
+
     struct abuf ab = ABUF_INIT;
 
     // \x1b escape character
@@ -274,8 +458,12 @@ void editorRefreshScreen() {
     abAppend(&ab, "\x1b[H", 3); // Move cursor to position 0,0
 
     editorDrawRows(&ab);
+    editorDrawStatusBar(&ab);
+    editorDrawMessageBar(&ab);
+
     char buf[32];
-    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", gc.cy + 1, gc.cx + 1);
+    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (gc.cy - gc.rowoff) + 1, 
+                                              (gc.rx - gc.coloff) + 1);
     abAppend(&ab, buf, strlen(buf));
 
     abAppend(&ab, "\x1b[?25h", 6); // Unhide cursor
@@ -284,9 +472,19 @@ void editorRefreshScreen() {
     abFree(&ab);
 }
 
+void editorSetStatusMessage(const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(gc.statusmsg, sizeof(gc.statusmsg), fmt, ap);
+    va_end(ap);
+    gc.statusmsg_time = time(NULL);
+}
+
 //-------------------------------- Input ---------------------------------------
 void editorMoveCursor(int key) {
-   switch (key) {
+    erow *row = (gc.cy >= gc.numrows) ? NULL : &gc.row[gc.cy];
+
+    switch (key) {
         //Using vim commands
         case(CURSOR_LEFT):
             if (gc.cx != 0) {
@@ -294,12 +492,13 @@ void editorMoveCursor(int key) {
             }
             break;
         case(CURSOR_RIGHT):
-            if (gc.cx != gc.columns - 1) {
+            if(row && gc.cx < row->size) {
                 gc.cx++;
             }
+            fprintf(debug_file, "debug here");
             break;
         case(CURSOR_DOWN):
-            if (gc.cy != gc.rows - 1) {
+            if (gc.cy < gc.numrows) {
                 gc.cy++;
             }
             break;
@@ -308,7 +507,15 @@ void editorMoveCursor(int key) {
                 gc.cy--;
             }
             break;
-   } 
+
+    } 
+
+    //Check if went up or down a row and update row variable
+    row = (gc.cy >= gc.numrows) ? NULL : &gc.row[gc.cy];
+    int rowlen = row ? row->size : 0;
+    if(gc.cx > rowlen) {
+        gc.cx = rowlen;
+    }
 }
 
 void processEditorKeyPress() {
@@ -325,13 +532,25 @@ void processEditorKeyPress() {
             gc.cx = 0;
             break;
         case END_KEY:
-            gc.cx = gc.columns - 1;
+            if (gc.cy < gc.numrows) {
+                gc.cx = gc.row[gc.cy].size;
+            }
             break;
 
         case PAGE_UP:
         case PAGE_DOWN:
             {
-                int times = gc.rows;
+                //If statement required to clear whole screen without going too far
+                if (c == PAGE_UP) {
+                    gc.cy = gc.rowoff;
+                } else if (c == PAGE_DOWN) {
+                    gc.cy = gc.rowoff + gc.terminal_rows - 1;
+                    if (gc.cy > gc.numrows) {
+                        gc.cy = gc.numrows;
+                    }
+                }
+
+                int times = gc.terminal_rows;
                 while(times--) {
                     editorMoveCursor(c == PAGE_UP ? CURSOR_UP : CURSOR_DOWN);
                 }
@@ -350,22 +569,52 @@ void processEditorKeyPress() {
 //-------------------------------- Init ----------------------------------------
 
 void initEditor() {
+    // Initial variable initialization
     gc.cx = 0;
     gc.cy = 0;
+    gc.rx = 0;
+    gc.rowoff = 0;
+    gc.coloff = 0;
+    gc.numrows = 0;
+    gc.row = NULL;
+    gc.filename = NULL;
+    gc.statusmsg[0] = '\0';
+    gc.statusmsg_time = 0;
 
-    if(getWindowSize(&gc.rows, &gc.columns) == -1) {
+    editorSetStatusMessage("Ctrl-Q = Quit Editor");
+
+    if(getWindowSize(&gc.terminal_rows, &gc.terminal_cols) == -1) {
         die("getWindowSize");
     }
+
+    gc.terminal_rows -= 2;
 }
 
-int main() {
+int main(int argc, char** argv) {
+
+    #ifdef DEBUG
+    debug_file = fopen("debug.log", "w");
+    if (debug_file == NULL) {
+        die("debug_file fopen error");
+    }
+
+    fprintf(debug_file, "test");
+    #endif
+
     enableRawMode();
     initEditor();
+    if (argc >= 2) {
+        editorOpen(argv[1]);
+    }
 
     while (1) {
         editorRefreshScreen();
         processEditorKeyPress();
     }
+    
+    #ifdef DEBUG
+    fclose(debug_file);
+    #endif
 
     return 0;
 }

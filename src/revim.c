@@ -26,6 +26,7 @@ FILE* debug_file = NULL;
 //------------------------------ Defines ---------------------------------------
 #define REVIM_VER "0.0.1" 
 #define REVIM_TAB_SIZE 4
+#define REVIM_QUIT_TIMES 3
 
 #define CTRL_KEY(k) ((k) & 0x1f)
 
@@ -283,10 +284,12 @@ void editorUpdateRow(erow *row) {
     row->rsize = idx;
 }
 
-void editorAppendRow(char *s, size_t len) {
-    gc.row = realloc(gc.row, sizeof(erow) * (gc.numrows + 1));
+void editorInsertRow(int at, char *s, size_t len) {
+    if (at < 0 || at > gc.numrows) return;
 
-    int at = gc.numrows;
+    gc.row = realloc(gc.row, sizeof(erow) * (gc.numrows + 1));
+    memmove(&gc.row[at + 1], &gc.row[at], sizeof(erow) * (gc.numrows - at));
+
     gc.row[at].size = len;
     gc.row[at].chars = malloc(len + 1);
     memcpy(gc.row[at].chars, s, len);
@@ -297,6 +300,20 @@ void editorAppendRow(char *s, size_t len) {
     editorUpdateRow(&gc.row[at]);
 
     gc.numrows++;
+    gc.dirty++;
+}
+
+void editorFreeRow(erow *row) {
+    free(row->render);
+    free(row->chars);
+}
+
+void editorDelRow(int at) {
+    if (at < 0 || at >= gc.numrows) return;
+    editorFreeRow(&gc.row[at]);
+
+    memmove(&gc.row[at], &gc.row[at + 1], sizeof(erow) * (gc.numrows - at - 1));
+    gc.numrows--;
     gc.dirty++;
 }
 
@@ -314,14 +331,64 @@ void editorRowInsertChar(erow *row, int at, int c) {
     gc.dirty++;
 }
 
+void editorRowAppendString(erow *row, char *s, size_t len) {
+    row->chars = realloc(row->chars, row->size + len + 1);
+    memcpy(&row->chars[row->size], s, len);
+    row->size += len;
+    row->chars[row->size] = '\0';
+    editorUpdateRow(row);
+    gc.dirty++;
+}
+
+void editorRowDelChar(erow *row, int at) {
+    if (at < 0 || at >= row->size) return;
+
+    memmove(&row->chars[at], &row->chars[at + 1], row->size - at);
+    row->size--;
+    editorUpdateRow(row);
+    gc.dirty++;
+}
+
 //--------------------------- Editor Operations --------------------------------
 void editorInsertChar(int c) {
     if (gc.cy == gc.numrows) {
-        editorAppendRow("", 0);
+        editorInsertRow(gc.numrows, "", 0);
     }
 
     editorRowInsertChar(&gc.row[gc.cy], gc.cx, c);
     gc.cx++;
+}
+
+void editorInsertNewline() {
+    if (gc.cx == 0) {
+        editorInsertRow(gc.cy, "", 0);
+    } else {
+        erow *row = &gc.row[gc.cy];
+        editorInsertRow(gc.cy + 1, &row->chars[gc.cx], row->size - gc.cx);
+        row = &gc.row[gc.cy];
+        row->size = gc.cx;
+        row->chars[row->size] = '\0';
+        editorUpdateRow(row);
+    }
+
+    gc.cy++;
+    gc.cx = 0;
+}
+
+void editorDelChar() {
+    if (gc.cy == gc.numrows) return;
+    if (gc.cx == 0 && gc.cy == 0) return;
+
+    erow *row = &gc.row[gc.cy];
+    if (gc.cx > 0) {
+        editorRowDelChar(row, gc.cx - 1);
+        gc.cx--;
+    } else {
+        gc.cx = gc.row[gc.cy - 1].size;
+        editorRowAppendString(&gc.row[gc.cy - 1], row->chars, row->size);
+        editorDelRow(gc.cy);
+        gc.cy--;
+    }
 }
 
 //------------------------------- File I/O -------------------------------------
@@ -365,7 +432,7 @@ void editorOpen(char *filename) {
                                 line[linelen -1] == '\r')) {
                 linelen--;
             }
-            editorAppendRow(line, linelen);
+            editorInsertRow(gc.numrows, line, linelen);
         }
     }
 
@@ -598,14 +665,23 @@ void editorMoveCursor(int key) {
 }
 
 void processEditorKeyPress() {
+    static int quit_times = REVIM_QUIT_TIMES;
+
     int c = editorReadKey();
 
     switch(c) {
         case '\r':
-            // TODO
+            editorInsertNewline();
             break;
 
         case(CTRL_KEY('q')):
+            if(gc.dirty && quit_times > 0) {
+                editorSetStatusMessage("Warning: File has unsaved changes" 
+                    "Press CTRL-Q %d more times to quit.", quit_times);
+                quit_times--;
+                return;
+            }
+
             //Clear screen when exiting
             exitCleanup();
             exit(0);
@@ -627,7 +703,11 @@ void processEditorKeyPress() {
         case BACKSPACE:
         case CTRL_KEY('h'):
         case DEL_KEY:
-            // TODO
+            if (c == DEL_KEY) {
+                editorMoveCursor(CURSOR_RIGHT);
+            }
+            editorDelChar();
+
             break;
 
         case PAGE_UP:
@@ -665,6 +745,8 @@ void processEditorKeyPress() {
             editorInsertChar(c);
             break;
     }
+
+    quit_times = REVIM_QUIT_TIMES;
 }
 
 //-------------------------------- Init ----------------------------------------

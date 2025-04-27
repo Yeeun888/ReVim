@@ -4,7 +4,8 @@ LDIR = ../lib
 ODIR = obj
 
 CXX=g++
-CPPFLAGS= --std=c++17 -Wall -I$(IDIR)
+CPPFLAGS= --std=c++17 -Wall -I$(IDIR) -lncurses
+# for this project -lncurses flag is required 
 
 CC=gcc
 CFLAGS= -I$(IDIR)

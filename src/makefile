@@ -15,7 +15,7 @@ LIBS=-lm
 _DEPS = 
 DEPS = $(patsubst %,$(IDIR)/%, $(_DEPS))
 
-_OBJ = revim.o
+_OBJ = revim.o gap_buffer.o
 OBJS = $(patsubst %,$(ODIR)/%, $(_OBJ))
 
 $(ODIR)/%.o : %.cpp $(DEPS) 

@@ -62,6 +62,10 @@ int main(int argc, char** argv) {
 
     std::fstream file("func.c", std::ios::in | std::ios::out);
     gb.init_gap_buffer(file, 128);
+    gb.insert('c');
+    gb.insert('c');
+    gb.insert('c');
+    gb.insert('c');
     gb.dump_buffer(std::cerr);
 
     // initscr(); 

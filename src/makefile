@@ -12,7 +12,7 @@ CFLAGS= -I$(IDIR)
 
 LIBS=-lm
 
-_DEPS = 
+_DEPS = gap_buffer.hpp
 DEPS = $(patsubst %,$(IDIR)/%, $(_DEPS))
 
 _OBJ = revim.o

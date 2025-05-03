@@ -58,10 +58,10 @@ void init_global_config() {
 }
 
 int main(int argc, char** argv) {
-    gap_buffer gb;
+    gap_buffer<char> gb;
 
-    std::fstream file("rekilo.c", std::ios::in | std::ios::out);
-    gb.init_gap_buffer(file);
+    std::fstream file("func.c", std::ios::in | std::ios::out);
+    gb.init_gap_buffer(file, 128);
     gb.dump_buffer(std::cerr);
 
     // initscr(); 

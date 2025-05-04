@@ -8,8 +8,10 @@ class gap_buffer {
         struct buf {
             T* _buffer;                 // Buffer containing text
             T* _gap_start;              // Gap start address
-            T* _gap_end;                // Gap end address
-            size_t _buf_size;           // Buffer size
+            T* _gap_end;                // Gap end address i.e next part buffer start
+                                        // address
+
+            size_t _buf_size;           // Buffer size 
         };
 
         static size_t gap_size;         // Gap starting size (double on resize)
@@ -53,14 +55,25 @@ class gap_buffer {
         void right();
 
         /**
-         * @brief Make buffer larger
+         * @brief Move to a certain position in the gap buffer
+         * 
+         * @param pos 
+         */
+        void move_to(size_t pos);
+
+        /**
+         * @brief Doubles buffer capacity compared to initialized buffer. 
+         * by default keeps doubling without limit. Behavior can be changed
          * 
          * @return 1 on success, 0 on filaure
          */ 
         int grow();
 
         // ------------------------ DEBUG FUNCTIONS ----------------------------
-        void dump_buffer(std::ostream& dump_stream);
+        T* dump_buffer();
+        T* dump_gap_start();
+        T* dump_gap_end();
+        char* dump_gap_address();
         void fill_gap(T t);
 };
 
@@ -100,7 +113,10 @@ void gap_buffer<T>::init_gap_buffer(std::fstream& stream, size_t start_gap_size)
     //Start gap at the end
     buf._gap_start = &buf._buffer[num_t];
     buf._gap_end = &buf._buffer[num_t + gap_size];
-    buf._buf_size = num_t + gap_size;
+    buf._buf_size = num_t;
+
+    // //Initialize null terminator
+    // *buf._gap_end = '\0';
 
     for (int i = 0; i < num_t; ++i) {
         stream.get(t);
@@ -124,19 +140,18 @@ int gap_buffer<T>::insert(T t) {
 
     *buf._gap_start = t;
     ++buf._gap_start;
+    ++buf._buf_size;
 
     return 1;
 }
 
 template <typename T>
 int gap_buffer<T>::grow() {
-    // Alternative to limit gap growth
-    // gap_size = (gap_size * 2 > 10000) 10000 : gap_size * 2;
+    size_t pb_start_idx = buf._gap_start - buf._buffer;
+    size_t pb_end_idx = buf._gap_end - buf._buffer;
+    size_t after_buff_move = buf._buf_size - (buf._gap_start - buf._buffer);
 
-    // This should be the same. However to confirm safety, it is recalculated
-    size_t prev_buf_start_index = buf._gap_start - buf._buffer;
-    size_t elements_to_move = buf._buf_size - (buf._gap_start - buf._buffer);
-
+    //Check for realloc failure so as to not loose the pointer
     T* newPtr = (T *)realloc(buf._buffer, sizeof(T) * (buf._buf_size + 2*gap_size));
     if (newPtr == nullptr)  {
         return 0;
@@ -144,26 +159,104 @@ int gap_buffer<T>::grow() {
         buf._buffer = newPtr;
     }
 
-    buf._gap_start = &buf._buffer[prev_buf_start_index];
-    buf._gap_end = &buf._buffer[prev_buf_start_index + 2*gap_size];
+    //Get new gap end location
+    T* new_gap_end = &buf._buffer[pb_start_idx + 2*gap_size];
+    memmove(new_gap_end, &buf._buffer[pb_end_idx], after_buff_move);
+
+    //Move gap and ends to new memory locations
+    buf._gap_start = &buf._buffer[pb_start_idx];
+    buf._gap_end = new_gap_end; 
     
-    memmove(buf._gap_end, buf._gap_start, elements_to_move); 
-    
-    buf._buf_size += 2*gap_size;
+    //gap_size and buf_size updated to reflect new changes
     gap_size *= 2;
-    //Move buffer items right
+
+    // Alternative to limit gap growth
+    // gap_size = (gap_size * 2 > 10000) 10000 : gap_size * 2;
 
     return 1;
 }
 
+template <typename T>
+void gap_buffer<T>::left() {
+    if (buf._gap_start == buf._buffer) return;
+
+    *(buf._gap_end - 1) = *(buf._gap_start - 1);
+    --buf._gap_start;
+    --buf._gap_end;
+}
+
+template <typename T>
+void gap_buffer<T>::right() {
+    if (buf._gap_start == &buf._buffer[buf._buf_size]) return;
+
+    *buf._gap_start = *(buf._gap_end + 1);
+    ++buf._gap_end;
+    ++buf._gap_start;
+}
+
+template <typename T>
+void gap_buffer<T>::move_to(size_t pos) {
+    size_t curr_pos = buf._gap_start - buf._buffer;
+    if (pos == curr_pos) return;
+
+    if (pos > curr_pos) {
+        for (; pos != curr_pos; ++curr_pos) {
+            right();
+        }
+    } else { //pos < curr_pos
+        for (; pos != curr_pos; ++pos) {
+            left();
+        }
+    }
+
+    return;
+}
+
 //--------------------------------- DEBUG  -------------------------------------
 template <typename T>
-void gap_buffer<T>::dump_buffer(std::ostream& dump_stream) {
-    dump_stream << buf._buffer << '\n';
-    dump_stream << buf._buf_size << '\n';
+T* gap_buffer<T>::dump_buffer() {
+    return buf._buffer;
+}
+
+template <typename T>
+T* gap_buffer<T>::dump_gap_end() {
+    return buf._gap_end;
+}
+
+template <typename T>
+T* gap_buffer<T>::dump_gap_start() {
+    return buf._gap_start;
+}
+
+template <typename T>
+char * gap_buffer<T>::dump_gap_address() {
+    char addr1[32];
+    char addr2[32];
+
+    // Convert the addresses to strings (platform-dependent format)
+    std::snprintf(addr1, sizeof(addr1), "%p", (void*)buf._gap_start);
+    std::snprintf(addr2, sizeof(addr2), "%p", (void*)buf._gap_end);
+
+    // Final result size = strlen(addr1) + 1 (space) + strlen(addr2) + 1 (null terminator)
+    size_t totalLength = strlen(addr1) + 1 + strlen(addr2) + 1 + 48;
+    char* result = new char[totalLength];
+
+    char calc[8];
+    std::snprintf(calc, sizeof(calc), "%ld", buf._gap_end - buf._gap_start);
+
+    // Concatenate addr1 + space + addr2
+    std::strcpy(result, addr1);
+    std::strcat(result, " ");
+    std::strcat(result, addr2);
+    std::strcat(result, " ");
+    std::strcat(result, calc);
+
+    return result;
 }
 
 template <typename T>
 void gap_buffer<T>::fill_gap(T t) {
-
+    for (T* ptr = buf._gap_start; ptr < buf._gap_end; ++ptr) {
+        *ptr = t;
+    }
 }
